@@ -119,12 +119,30 @@ def extract_text(contents: str, filename: str) -> str:
             return txt
     raise ValueError("Extensión no soportada")
 
-def text_to_mp3_bytes(text: str, lang="en") -> bytes:
+from functools import lru_cache
+from gtts.tts import gTTSError
+
+@lru_cache(maxsize=128)
+def _cached_tts(text: str, lang: str, tld: str) -> bytes:
+    """Devuelve MP3 bytes usando un TLD concreto."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-        gTTS(text=text, lang=lang).save(fp.name)
-        fp.seek(0); data = fp.read()
+        gTTS(text=text, lang=lang, tld=tld).save(fp.name)
+        fp.seek(0)
+        data = fp.read()
     os.remove(fp.name)
     return data
+
+def text_to_mp3_bytes(text: str, lang="en") -> bytes:
+    """Intenta varios TLDs hasta que alguno no devuelva 429."""
+    for tld in ("com", "co.uk", "com.au", "co.in"):
+        try:
+            return _cached_tts(text, lang, tld)
+        except gTTSError as e:
+            if "429" in str(e):
+                continue          # prueba el siguiente dominio
+            raise                # error distinto → propagar
+    raise RuntimeError("gTTS bloqueado en todos los TLD probados (429)")
+
 
 def spanified(words: List[str], idx: int):
     out=[]
