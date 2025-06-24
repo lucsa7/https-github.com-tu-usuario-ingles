@@ -1,0 +1,26 @@
+# entornos y compilados
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*.so
+*.pyd
+*.dll
+
+# datos temporales / cache
+*.log
+*.tmp
+*.cache
+*.egg-info/
+
+# sistemas Windows / VS Code
+*.DS_Store
+Thumbs.db
+.vscode/
+
+# salida de audio/video (por si subes MP3)
+*.mp3
+*.wav
+assets/
+
+# TODO: agrega aquí lo que no quieras trackear
