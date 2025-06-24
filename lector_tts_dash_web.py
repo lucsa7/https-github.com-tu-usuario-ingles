@@ -119,12 +119,14 @@ def extract_text(contents: str, filename: str) -> str:
             return txt
     raise ValueError("Extensión no soportada")
 
+# ── arriba, junto a otros imports ──────────────────────────────────────────
 from functools import lru_cache
-from gtts.tts import gTTSError
+from gtts.tts import gTTSError               # importa la excepción
 
-@lru_cache(maxsize=128)
-def _cached_tts(text: str, lang: str, tld: str) -> bytes:
-    """Devuelve MP3 bytes usando un TLD concreto."""
+# ── nuevo código ───────────────────────────────────────────────────────────
+@lru_cache(maxsize=128)                      # cachea audios repetidos
+def _tts_cached(text: str, lang: str, tld: str) -> bytes:
+    """Devuelve MP3 para <text,lang,tld> (con caché)."""
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         gTTS(text=text, lang=lang, tld=tld).save(fp.name)
         fp.seek(0)
@@ -133,15 +135,16 @@ def _cached_tts(text: str, lang: str, tld: str) -> bytes:
     return data
 
 def text_to_mp3_bytes(text: str, lang="en") -> bytes:
-    """Intenta varios TLDs hasta que alguno no devuelva 429."""
+    """Intenta varios dominios de Google hasta que uno no devuelva 429."""
     for tld in ("com", "co.uk", "com.au", "co.in"):
         try:
-            return _cached_tts(text, lang, tld)
+            return _tts_cached(text, lang, tld)
         except gTTSError as e:
             if "429" in str(e):
-                continue          # prueba el siguiente dominio
-            raise                # error distinto → propagar
-    raise RuntimeError("gTTS bloqueado en todos los TLD probados (429)")
+                continue        # saltamos al siguiente TLD
+            raise               # otro error → propagar
+    raise RuntimeError("gTTS bloqueado: todos los TLD devolvieron 429")
+
 
 
 def spanified(words: List[str], idx: int):
@@ -272,16 +275,32 @@ def speak_handler(text, voice, rate, toggle, _):
     to_read = smart_translate(text) if "ON" in toggle else text
     WORDS, WORD_IDX = re.findall(r"\S+|\n", to_read), -1
 
-    # Render / cloud → gTTS
+    # ── Render / cloud → gTTS ────────────────────────────────────────────
     if pyttsx3 is None:
-        mp3=text_to_mp3_bytes(to_read, detect_lang(to_read))
-        src = f"data:audio/mpeg;base64,{base64.b64encode(mp3).decode()}"
+        try:
+            mp3 = text_to_mp3_bytes(to_read, detect_lang(to_read))
+        except RuntimeError as err:
+            # Todos los dominios de Google devolvieron 429 → avisamos y salimos
+            return f"⚠️ {err}", True, "", no_update
+
+        # Convertimos a data-URI y lo inyectamos en el <audio>
+        src = f"data:audio/mp3;base64,{base64.b64encode(mp3).decode()}"
         return "▶️ Reproduciendo (gTTS)", True, "", src
 
-    # Local → pyttsx3
-    threading.Thread(target=speak_local,
-                     args=(to_read, voice, rate), daemon=True).start()
-    return f"▶️ Leyendo – voz: {voice} @ {rate} wpm", False, spanified(WORDS,-1), no_update
+    # ── Local → pyttsx3 ─────────────────────────────────────────────────
+    threading.Thread(
+        target=speak_local,
+        args=(to_read, voice, rate),
+        daemon=True
+    ).start()
+
+    return (
+        f"▶️ Leyendo – voz: {voice} @ {rate} wpm",
+        False,
+        spanified(WORDS, -1),
+        no_update
+    )
+
 
 @app.callback(
     Output("highlight-box","children", allow_duplicate=True),
