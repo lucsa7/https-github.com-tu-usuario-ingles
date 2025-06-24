@@ -257,7 +257,7 @@ def speak_handler(text, voice, rate, toggle, _):
     # Render / cloud → gTTS
     if pyttsx3 is None:
         mp3=text_to_mp3_bytes(to_read, detect_lang(to_read))
-        src=f"data:audio/mp3;base64,{base64.b64encode(mp3).decode()}"
+        src = f"data:audio/mpeg;base64,{base64.b64encode(mp3).decode()}"
         return "▶️ Reproduciendo (gTTS)", True, "", src
 
     # Local → pyttsx3
@@ -293,9 +293,12 @@ def stop(_):
 def dl_audio(text,toggle,_):
     if not text.strip(): return no_update
     processed = smart_translate(text) if "ON" in toggle else text
-    return dcc.send_bytes(text_to_mp3_bytes(processed,
-                                            detect_lang(processed)),
-                          "speech.mp3")
+    return dcc.send_bytes(
+    text_to_mp3_bytes(processed, detect_lang(processed)),
+    "speech.mp3",
+    mime_type="audio/mpeg"          # ← opcional, pero más limpio
+)
+
 
 @app.callback(Output("download-text","data"),
               State("text-input","value"),
