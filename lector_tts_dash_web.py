@@ -326,7 +326,6 @@ def dl_txt(text,toggle,_):
     result = smart_translate(text) if "ON" in toggle else text
     fname = "translation_en.txt" if detect_lang(result)=="en" else "traduccion_es.txt"
     return dict(content=result, filename=fname, type="text/plain")
-
 # ── run ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8050)), debug=False)
