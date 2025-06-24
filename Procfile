@@ -1,0 +1,1 @@
+web: gunicorn lector_tts_dash_web:server --preload
