@@ -1,40 +1,39 @@
 ##############################################################################
-# lector_tts_dash_web.py — v5.4 (2025-06-23) cloud-safe + audio player      #
+# lector_tts_dash_web.py — v5.5 (2025-06-24) cloud-safe + gTTS 429 fix       #
 ##############################################################################
-# • Tema oscuro CYBORG + Montserrat                                          #
-# • pyttsx3 es OPCIONAL → si falta (Render) se usa gTTS + <audio>            #
-# • Descarga de MP3 y texto funcionando en local y en la nube                #
+# • Tema oscuro CYBORG (Bootswatch) + Montserrat                              #
+# • pyttsx3 offline si existe ― si no, gTTS con rotación de dominio + caché   #
+# • Manejo de errores 429, MP3/TXT download y reproducción directa            #
 ##############################################################################
 
-import os, io, re, base64, tempfile, threading, pathlib, warnings
+import os, io, re, base64, tempfile, threading, pathlib, warnings, time
+from functools import lru_cache
 from typing import List, Optional
 
 import dash, dash_bootstrap_components as dbc
 from dash import dcc, html, Input, Output, State, no_update
-# ── arriba, junto a otros imports ──────────────────────────────────────────
-from functools import lru_cache
-from gtts.tts import gTTSError               # importa la excepción
 
-# ── TTS libs ───────────────────────────────────────────────────────────────
+# ── TTS libs ────────────────────────────────────────────────────────────────
 try:
-    import pyttsx3                      # disponible en tu PC
+    import pyttsx3                      # disponible en tu PC (Windows/macOS)
 except ImportError:
     pyttsx3 = None                      # falta en Render
 
-from gtts import gTTS                   # siempre disponible (requiere Internet)
+from gtts import gTTS                   # online fallback
+from gtts.tts import gTTSError          # excepción propia
 from deep_translator import GoogleTranslator
 from langdetect import detect, LangDetectException
 
-# ── NLP opcional (spaCy) ───────────────────────────────────────────────────
+# ── NLP opcional (spaCy) ────────────────────────────────────────────────────
 try:
     import spacy
     _NLP_EN = spacy.load("en_core_web_sm")
     _NLP_ES = spacy.load("es_core_news_sm")
 except (ImportError, OSError):
     spacy, _NLP_EN, _NLP_ES = None, None, None
-    warnings.warn("spaCy no disponible; se usará regex heurística.")
+    warnings.warn("spaCy no disponible; se usará heurística regex.")
 
-# ── Config. global ─────────────────────────────────────────────────────────
+# ── Config ──────────────────────────────────────────────────────────────────
 VOICE_OPTIONS   = {"US English": "Zira"}
 DEFAULT_RATE    = 175
 HIGHLIGHT_STYLE = {"backgroundColor": "#ffe46b", "borderRadius": "4px"}
@@ -49,7 +48,7 @@ WORD_IDX: int    = -1
 READING: bool    = False
 ENG: Optional["pyttsx3.Engine"] = None
 
-# ── helpers ----------------------------------------------------------------
+# ── helpers ─────────────────────────────────────────────────────────────────
 def _safe_pdf_extract(raw: bytes) -> str:
     try:
         from pdfminer.high_level import extract_text
@@ -60,7 +59,7 @@ def _safe_pdf_extract(raw: bytes) -> str:
         return ""
 
 def _protect_entities(text: str, lang: str) -> tuple[str, dict[str, str]]:
-    protected = []
+    protected: list[str] = []
     if spacy and ((lang=="en" and _NLP_EN) or (lang=="es" and _NLP_ES)):
         nlp = _NLP_EN if lang=="en" else _NLP_ES
         protected += [e.text for e in nlp(text).ents
@@ -118,32 +117,29 @@ def extract_text(contents: str, filename: str) -> str:
                          for p in load(io.BytesIO(raw)).getElementsByType(odt_text.P))
     if ext == ".pdf":
         txt = _safe_pdf_extract(raw)
-        if txt:
-            return txt
+        if txt: return txt
     raise ValueError("Extensión no soportada")
 
-
-
-@lru_cache(maxsize=128)                       # cachea 128 textos
-def _tts_cached(text: str, lang: str, tld: str) -> bytes:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
-        gTTS(text=text, lang=lang, tld=tld).save(fp.name)
-        fp.seek(0)
-        data = fp.read()
-    os.remove(fp.name)
-    return data
+# ── gTTS con caché + rotación de dominio ───────────────────────────────────
+@lru_cache(maxsize=256)
+def _mp3_cached(text: str, lang: str) -> bytes:
+    """Devuelve MP3 usando gTTS, probando varios dominios y cacheando."""
+    last_err = None
+    for tld in ("com", "co.uk", "com.au", "ca"):
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
+                gTTS(text=text, lang=lang, tld=tld).save(fp.name)
+                fp.seek(0)
+                data = fp.read()
+            os.remove(fp.name)
+            return data
+        except gTTSError as e:          # 429, etc.
+            last_err = e
+            time.sleep(1.2)             # back-off breve
+    raise last_err                      # si fallaron todos los dominios
 
 def text_to_mp3_bytes(text: str, lang="en") -> bytes:
-    """Intenta varios dominios hasta que uno no devuelva 429."""
-    for tld in ("com", "co.uk", "com.au", "co.in"):
-        try:
-            return _tts_cached(text, lang, tld)
-        except gTTSError as e:
-            if "429" in str(e):
-                continue          # rate-limit ⇒ probamos siguiente
-            raise                # otro error ⇒ lo dejamos salir
-    raise RuntimeError("gTTS bloqueado en todos los TLD probados (429)")
-
+    return _mp3_cached(text, lang)      # simple wrapper (p/ coherencia)
 
 def spanified(words: List[str], idx: int):
     out=[]
@@ -152,7 +148,7 @@ def spanified(words: List[str], idx: int):
         out.extend((html.Span(w,style=style), html.Span(" ")))
     return out
 
-# ── pyttsx3 hilo (solo local) ---------------------------------------------
+# ── pyttsx3 (solo local) ───────────────────────────────────────────────────
 def speak_local(text: str, voice_key: str, rate: int):
     global WORD_IDX, READING, ENG
     if pyttsx3 is None: return
@@ -167,7 +163,7 @@ def speak_local(text: str, voice_key: str, rate: int):
     ENG.say(text); ENG.runAndWait()
     READING, ENG = False, None
 
-# ── Dash UI ----------------------------------------------------------------
+# ── Dash UI ────────────────────────────────────────────────────────────────
 external_css = [
     dbc.themes.CYBORG,
     "https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700&display=swap"
@@ -181,11 +177,10 @@ app.index_string = (
     ".gradient-btn{background-image:linear-gradient(45deg,#ff4b2b,#ff416c);border:none}"
     ".gradient-btn:hover{filter:brightness(1.1)}</style></head>"
     "<body class='bg-dark text-light'><nav class='navbar navbar-dark bg-danger sticky-top'>"
-    "<div class='container-fluid'><span class='navbar-brand mb-0 h1'>🗣️ TTS Translator</span></div></nav>"
-    "<div class='container-fluid pt-4'>{%app_entry%}</div>"
-    "<footer class='text-center text-secondary py-4'><small>© 2025 STA methodologies · "
-    "<a href='https://www.instagram.com/profesorlucianosacaba' class='link-secondary'>Instagram</a>"
-    "</small></footer>{%config%}{%scripts%}{%renderer%}</body></html>"
+    "<div class='container-fluid'><span class='navbar-brand mb-0 h1'>🗣️ TTS Translator</span>"
+    "</div></nav><div class='container-fluid pt-4'>{%app_entry%}</div>"
+    "<footer class='text-center text-secondary py-4'><small>© 2025 STA methodologies</small>"
+    "</footer>{%config%}{%scripts%}{%renderer%}</body></html>"
 )
 
 controls = dbc.Card(dbc.CardBody([
@@ -240,7 +235,7 @@ app.layout = dbc.Container([
     dcc.Download(id="download-text")
 ], fluid=True)
 
-# ── Callbacks --------------------------------------------------------------
+# ── Callbacks ──────────────────────────────────────────────────────────────
 @app.callback(Output("text-input","value"),
               Input("upload-doc","contents"),
               State("upload-doc","filename"),
@@ -273,30 +268,19 @@ def speak_handler(text, voice, rate, toggle, _):
     to_read = smart_translate(text) if "ON" in toggle else text
     WORDS, WORD_IDX = re.findall(r"\S+|\n", to_read), -1
 
-    # ── Render / cloud → gTTS ───────────────────────────────────────────
+    # ── gTTS (Render/cloud) ────────────────────────────────────────────────
     if pyttsx3 is None:
         try:
             mp3 = text_to_mp3_bytes(to_read, detect_lang(to_read))
-        except RuntimeError as err:
-            # gTTS sigue rate-limit → mensaje y nada de audio
-            return f"⚠️ {err}", True, "", no_update
-
-        src = f"data:audio/mp3;base64,{base64.b64encode(mp3).decode()}"
+        except gTTSError as err:
+            return f"⚠️ Google TTS limit: {err}", True, "", no_update
+        src = "data:audio/mp3;base64," + base64.b64encode(mp3).decode()
         return "▶️ Reproduciendo (gTTS)", True, "", src
 
-    # ── Local (pyttsx3) ────────────────────────────────────────────────
-    threading.Thread(
-        target=speak_local,
-        args=(to_read, voice, rate),
-        daemon=True
-    ).start()
-
-    return (
-        f"▶️ Leyendo – voz: {voice} @ {rate} wpm",
-        False,
-        spanified(WORDS, -1),
-        no_update
-    )
+    # ── pyttsx3 (local) ────────────────────────────────────────────────────
+    threading.Thread(target=speak_local,
+                     args=(to_read, voice, rate), daemon=True).start()
+    return f"▶️ Leyendo – voz: {voice} @ {rate} wpm", False, spanified(WORDS,-1), no_update
 
 @app.callback(
     Output("highlight-box","children", allow_duplicate=True),
@@ -326,12 +310,11 @@ def stop(_):
 def dl_audio(text,toggle,_):
     if not text.strip(): return no_update
     processed = smart_translate(text) if "ON" in toggle else text
-    return dcc.send_bytes(
-    text_to_mp3_bytes(processed, detect_lang(processed)),
-    "speech.mp3",
-    mime_type="audio/mpeg"          # ← opcional, pero más limpio
-)
-
+    try:
+        mp3 = text_to_mp3_bytes(processed, detect_lang(processed))
+    except gTTSError as err:
+        return no_update                 # silencioso; ya se mostró error arriba
+    return dcc.send_bytes(mp3, "speech.mp3")
 
 @app.callback(Output("download-text","data"),
               State("text-input","value"),
@@ -344,7 +327,7 @@ def dl_txt(text,toggle,_):
     fname = "translation_en.txt" if detect_lang(result)=="en" else "traduccion_es.txt"
     return dict(content=result, filename=fname, type="text/plain")
 
-# ── run -------------------------------------------------------------------
+# ── run ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8050)), debug=False)
 
