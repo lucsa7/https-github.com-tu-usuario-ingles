@@ -1,8 +1,9 @@
 ##############################################################################
-#  lector_tts_dash_web.py — v5.4 (2025-06-23)  cloud-safe + audio player    #
+# lector_tts_dash_web.py — v5.4 (2025-06-23) cloud-safe + audio player      #
 ##############################################################################
-#  • Fallback gTTS con <audio> src=base64 para servidores sin pyttsx3        #
-#  • Sigue usando pyttsx3 offline si está instalado                          #
+# • Tema oscuro CYBORG + Montserrat                                          #
+# • pyttsx3 es OPCIONAL → si falta (Render) se usa gTTS + <audio>            #
+# • Descarga de MP3 y texto funcionando en local y en la nube                #
 ##############################################################################
 
 import os, io, re, base64, tempfile, threading, pathlib, warnings
@@ -13,11 +14,11 @@ from dash import dcc, html, Input, Output, State, no_update
 
 # ── TTS libs ───────────────────────────────────────────────────────────────
 try:
-    import pyttsx3                      # disponible en el PC local
+    import pyttsx3                      # disponible en tu PC
 except ImportError:
     pyttsx3 = None                      # falta en Render
 
-from gtts import gTTS                   # online fallback
+from gtts import gTTS                   # siempre disponible (requiere Internet)
 from deep_translator import GoogleTranslator
 from langdetect import detect, LangDetectException
 
@@ -28,11 +29,11 @@ try:
     _NLP_ES = spacy.load("es_core_news_sm")
 except (ImportError, OSError):
     spacy, _NLP_EN, _NLP_ES = None, None, None
-    warnings.warn("spaCy no disponible; se usará regex.")
+    warnings.warn("spaCy no disponible; se usará regex heurística.")
 
-# ── Configuración ----------------------------------------------------------
-VOICE_OPTIONS = {"US English": "Zira"}
-DEFAULT_RATE  = 175
+# ── Config. global ─────────────────────────────────────────────────────────
+VOICE_OPTIONS   = {"US English": "Zira"}
+DEFAULT_RATE    = 175
 HIGHLIGHT_STYLE = {"backgroundColor": "#ffe46b", "borderRadius": "4px"}
 
 TAG, TAG_RE   = "[[", re.compile(r"\[\[\s*(\d+)\s*]]")
@@ -41,106 +42,119 @@ STOP_TOKENS   = {"Hola","Te","La","El","Los","Las","Un","Una",
                  "Buenos","Buenas","Por","Sin","Con"}
 
 WORDS: List[str] = []
-WORD_IDX:int = -1
-READING:bool = False
+WORD_IDX: int    = -1
+READING: bool    = False
 ENG: Optional["pyttsx3.Engine"] = None
 
-# ── helpers ---------------------------------------------------------------
-def _safe_pdf_extract(raw:bytes)->str:
+# ── helpers ----------------------------------------------------------------
+def _safe_pdf_extract(raw: bytes) -> str:
     try:
         from pdfminer.high_level import extract_text
-        with tempfile.NamedTemporaryFile(delete=False,suffix=".pdf") as fp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as fp:
             fp.write(raw); fp.flush()
             return extract_text(fp.name)
-    except Exception: return ""
+    except Exception:
+        return ""
 
-def _protect_entities(text:str, lang:str)->tuple[str,dict[str,str]]:
-    protected=[]
+def _protect_entities(text: str, lang: str) -> tuple[str, dict[str, str]]:
+    protected = []
     if spacy and ((lang=="en" and _NLP_EN) or (lang=="es" and _NLP_ES)):
-        nlp=_NLP_EN if lang=="en" else _NLP_ES
-        protected+=[e.text for e in nlp(text).ents
-                    if e.label_ in {"PERSON","ORG","PRODUCT","WORK_OF_ART","GPE"}]
-    for tok in re.findall(CAPITAL_PAT,text):
-        if tok not in STOP_TOKENS: protected.append(tok)
-    protected=sorted(set(protected), key=len, reverse=True)
-    tag_map={p:f"{TAG}{i}]]" for i,p in enumerate(protected)}
-    tmp=text
-    for o,t in tag_map.items(): tmp=tmp.replace(o,t)
+        nlp = _NLP_EN if lang=="en" else _NLP_ES
+        protected += [e.text for e in nlp(text).ents
+                      if e.label_ in {"PERSON","ORG","PRODUCT","WORK_OF_ART","GPE"}]
+    for tok in re.findall(CAPITAL_PAT, text):
+        if tok not in STOP_TOKENS:
+            protected.append(tok)
+    protected = sorted(set(protected), key=len, reverse=True)
+    tag_map   = {p: f"{TAG}{i}]]" for i, p in enumerate(protected)}
+    tmp = text
+    for o, t in tag_map.items():
+        tmp = tmp.replace(o, t)
     return tmp, tag_map
 
-def _restore_entities(text:str, tag_map:dict[str,str])->str:
-    for o,t in tag_map.items(): text=text.replace(t,o)
+def _restore_entities(text: str, tag_map: dict[str, str]) -> str:
+    for o, t in tag_map.items():
+        text = text.replace(t, o)
     return text
 
-def smart_translate(text:str)->str:
-    if not text.strip(): return text
-    try: src="en" if detect(text).startswith("en") else "es"
-    except LangDetectException: src="es"
-    tgt="es" if src=="en" else "en"
-    tmp,map_=_protect_entities(text,src)
-    sentences=re.split(r"(?<=[.!?])\s+",tmp)
-    translated=" ".join(GoogleTranslator(source=src,target=tgt).translate(s)
-                        for s in sentences if s)
-    translated=TAG_RE.sub(lambda m:f"{TAG}{m.group(1)}]]",translated)
-    return _restore_entities(translated,map_)
+def smart_translate(text: str) -> str:
+    if not text.strip():
+        return text
+    try:
+        src = "en" if detect(text).startswith("en") else "es"
+    except LangDetectException:
+        src = "es"
+    tgt = "es" if src == "en" else "en"
 
-def detect_lang(text:str)->str:
-    try: code=detect(text)
-    except LangDetectException: code="es"
-    return "en" if code.startswith("en") else "es"
+    tmp, mp = _protect_entities(text, src)
+    sents = re.split(r"(?<=[.!?])\s+", tmp)
+    translated = " ".join(GoogleTranslator(source=src, target=tgt).translate(s)
+                          for s in sents if s)
+    translated = TAG_RE.sub(lambda m: f"{TAG}{m.group(1)}]]", translated)
+    return _restore_entities(translated, mp)
 
-def extract_text(contents:str, filename:str)->str:
-    header,b64=contents.split(",",1)
-    raw=base64.b64decode(b64)
-    ext=pathlib.Path(filename).suffix.lower()
-    if ext==".txt": return raw.decode("utf-8",errors="ignore")
-    if ext==".docx":
+def detect_lang(text: str) -> str:
+    try:
+        return "en" if detect(text).startswith("en") else "es"
+    except LangDetectException:
+        return "es"
+
+def extract_text(contents: str, filename: str) -> str:
+    header, b64 = contents.split(",", 1)
+    raw = base64.b64decode(b64)
+    ext = pathlib.Path(filename).suffix.lower()
+    if ext == ".txt":
+        return raw.decode("utf-8", errors="ignore")
+    if ext == ".docx":
         from docx import Document
         return "\n".join(p.text for p in Document(io.BytesIO(raw)).paragraphs)
-    if ext==".odt":
+    if ext == ".odt":
         from odf import text as odt_text, teletype
         from odf.opendocument import load
         return "\n".join(teletype.extractText(p)
-                         for p in load(io.BytesIO(raw))
-                         .getElementsByType(odt_text.P))
-    if ext==".pdf":
-        txt=_safe_pdf_extract(raw)
-        if txt: return txt
+                         for p in load(io.BytesIO(raw)).getElementsByType(odt_text.P))
+    if ext == ".pdf":
+        txt = _safe_pdf_extract(raw)
+        if txt:
+            return txt
     raise ValueError("Extensión no soportada")
 
-def text_to_mp3_bytes(text:str, lang="en")->bytes:
-    with tempfile.NamedTemporaryFile(delete=False,suffix=".mp3") as fp:
+def text_to_mp3_bytes(text: str, lang="en") -> bytes:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as fp:
         gTTS(text=text, lang=lang).save(fp.name)
-        fp.seek(0); data=fp.read()
-    os.remove(fp.name); return data
+        fp.seek(0); data = fp.read()
+    os.remove(fp.name)
+    return data
 
-def spanified(words:List[str], idx:int):
-    spans=[]
+def spanified(words: List[str], idx: int):
+    out=[]
     for i,w in enumerate(words):
         style=HIGHLIGHT_STYLE if i==idx else {}
-        spans.extend((html.Span(w,style=style), html.Span(" ")))
-    return spans
+        out.extend((html.Span(w,style=style), html.Span(" ")))
+    return out
 
-# ── TTS hilo (solo local) --------------------------------------------------
-def speak_local(text:str, voice_key:str, rate:int):
+# ── pyttsx3 hilo (solo local) ---------------------------------------------
+def speak_local(text: str, voice_key: str, rate: int):
     global WORD_IDX, READING, ENG
     if pyttsx3 is None: return
-    ENG=pyttsx3.init()
+    ENG = pyttsx3.init()
     for v in ENG.getProperty("voices"):
         if voice_key.lower() in v.name.lower():
-            ENG.setProperty("voice",v.id); break
-    ENG.setProperty("rate",int(rate))
-    ENG.connect("started-word", lambda *_:globals().__setitem__("WORD_IDX", WORD_IDX+1))
-    READING, WORD_IDX=True,-1
+            ENG.setProperty("voice", v.id); break
+    ENG.setProperty("rate", int(rate))
+    ENG.connect("started-word",
+                lambda *_: globals().__setitem__("WORD_IDX", WORD_IDX+1))
+    READING, WORD_IDX = True, -1
     ENG.say(text); ENG.runAndWait()
-    READING, ENG=False,None
+    READING, ENG = False, None
 
-# ── Dash UI ---------------------------------------------------------------
-external_stylesheets=[dbc.themes.CYBORG,
-" https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700&display=swap"]
-app=dash.Dash(__name__, external_stylesheets=external_stylesheets,
-              title="TTS Translator")
-server=app.server
+# ── Dash UI ----------------------------------------------------------------
+external_css = [
+    dbc.themes.CYBORG,
+    "https://fonts.googleapis.com/css2?family=Montserrat:wght@300;500;700&display=swap"
+]
+app = dash.Dash(__name__, external_stylesheets=external_css, title="TTS Translator")
+server = app.server
 
 app.index_string = (
     "<!DOCTYPE html><html><head>{%metas%}<title>{%title%}</title>{%favicon%}{%css%}"
@@ -148,14 +162,14 @@ app.index_string = (
     ".gradient-btn{background-image:linear-gradient(45deg,#ff4b2b,#ff416c);border:none}"
     ".gradient-btn:hover{filter:brightness(1.1)}</style></head>"
     "<body class='bg-dark text-light'><nav class='navbar navbar-dark bg-danger sticky-top'>"
-    "<div class='container-fluid'><span class='navbar-brand mb-0 h1'>🗣️ TTS Translator</span>"
-    "</div></nav><div class='container-fluid pt-4'>{%app_entry%}</div>"
+    "<div class='container-fluid'><span class='navbar-brand mb-0 h1'>🗣️ TTS Translator</span></div></nav>"
+    "<div class='container-fluid pt-4'>{%app_entry%}</div>"
     "<footer class='text-center text-secondary py-4'><small>© 2025 STA methodologies · "
     "<a href='https://www.instagram.com/profesorlucianosacaba' class='link-secondary'>Instagram</a>"
     "</small></footer>{%config%}{%scripts%}{%renderer%}</body></html>"
 )
 
-controls=dbc.Card(dbc.CardBody([
+controls = dbc.Card(dbc.CardBody([
     dbc.Textarea(id="text-input", placeholder="Escribe o sube un documento…",
                  style={"width":"100%","height":200,"fontSize":20}),
     dcc.Upload(id="upload-doc", multiple=False,
@@ -186,7 +200,7 @@ controls=dbc.Card(dbc.CardBody([
     ], className="mt-4")
 ]), className="shadow-lg border-0 bg-dark text-light")
 
-app.layout=dbc.Container([
+app.layout = dbc.Container([
     dbc.Row([
         dbc.Col(controls, md=5, lg=4),
         dbc.Col([
@@ -207,9 +221,10 @@ app.layout=dbc.Container([
     dcc.Download(id="download-text")
 ], fluid=True)
 
-# ── callbacks --------------------------------------------------------------
+# ── Callbacks --------------------------------------------------------------
 @app.callback(Output("text-input","value"),
-              Input("upload-doc","contents"), State("upload-doc","filename"),
+              Input("upload-doc","contents"),
+              State("upload-doc","filename"),
               prevent_initial_call=True)
 def file_up(c,f):
     if not c: return no_update
@@ -221,46 +236,49 @@ def file_up(c,f):
 def update_tr(text,toggle):
     return smart_translate(text) if text and "ON" in toggle else text or ""
 
-@app.callback(Output("status","children"),
-              Output("tick","disabled", allow_duplicate=True),
-              Output("highlight-box","children", allow_duplicate=True),
-              Output("audio-player","src"),       # nuevo output
-              State("text-input","value"),
-              State("voice-selector","value"),
-              State("rate-slider","value"),
-              State("translate-toggle","value"),
-              Input("speak-btn","n_clicks"),
-              prevent_initial_call=True)
-def on_speak(text, voice, rate, toggle, _):
+@app.callback(
+    Output("status","children"),
+    Output("tick","disabled", allow_duplicate=True),
+    Output("highlight-box","children", allow_duplicate=True),
+    Output("audio-player","src"),
+    State("text-input","value"),
+    State("voice-selector","value"),
+    State("rate-slider","value"),
+    State("translate-toggle","value"),
+    Input("speak-btn","n_clicks"),
+    prevent_initial_call=True)
+def speak_handler(text, voice, rate, toggle, _):
     global WORDS, WORD_IDX
     if not text or not text.strip():
         return "⚠️ Escribe algo o sube un documento primero.", True, "", no_update
     to_read = smart_translate(text) if "ON" in toggle else text
-    WORDS, WORD_IDX = re.findall(r"\\S+|\\n", to_read), -1
+    WORDS, WORD_IDX = re.findall(r"\S+|\n", to_read), -1
 
-    # nube → gTTS
+    # Render / cloud → gTTS
     if pyttsx3 is None:
         mp3=text_to_mp3_bytes(to_read, detect_lang(to_read))
         src=f"data:audio/mp3;base64,{base64.b64encode(mp3).decode()}"
         return "▶️ Reproduciendo (gTTS)", True, "", src
 
-    # local → pyttsx3
+    # Local → pyttsx3
     threading.Thread(target=speak_local,
                      args=(to_read, voice, rate), daemon=True).start()
     return f"▶️ Leyendo – voz: {voice} @ {rate} wpm", False, spanified(WORDS,-1), no_update
 
-@app.callback(Output("highlight-box","children", allow_duplicate=True),
-              Output("tick","disabled", allow_duplicate=True),
-              Output("audio-player","src", allow_duplicate=True),
-              Input("tick","n_intervals"), prevent_initial_call=True)
+@app.callback(
+    Output("highlight-box","children", allow_duplicate=True),
+    Output("tick","disabled", allow_duplicate=True),
+    Output("audio-player","src", allow_duplicate=True),
+    Input("tick","n_intervals"), prevent_initial_call=True)
 def tick(_):
     return (spanified(WORDS, WORD_IDX), False, no_update) if READING else (no_update, True, no_update)
 
-@app.callback(Output("status","children", allow_duplicate=True),
-              Output("tick","disabled", allow_duplicate=True),
-              Output("highlight-box","children", allow_duplicate=True),
-              Output("audio-player","src", allow_duplicate=True),
-              Input("stop-btn","n_clicks"), prevent_initial_call=True)
+@app.callback(
+    Output("status","children", allow_duplicate=True),
+    Output("tick","disabled", allow_duplicate=True),
+    Output("highlight-box","children", allow_duplicate=True),
+    Output("audio-player","src", allow_duplicate=True),
+    Input("stop-btn","n_clicks"), prevent_initial_call=True)
 def stop(_):
     global READING, WORD_IDX
     if READING and ENG: ENG.stop()
@@ -268,26 +286,32 @@ def stop(_):
     return "⏹️ Detenido", True, spanified(WORDS,-1), no_update
 
 @app.callback(Output("download-audio","data"),
-              State("text-input","value"), State("translate-toggle","value"),
-              Input("download-btn","n_clicks"), prevent_initial_call=True)
+              State("text-input","value"),
+              State("translate-toggle","value"),
+              Input("download-btn","n_clicks"),
+              prevent_initial_call=True)
 def dl_audio(text,toggle,_):
     if not text.strip(): return no_update
     processed = smart_translate(text) if "ON" in toggle else text
-    return dcc.send_bytes(text_to_mp3_bytes(processed, detect_lang(processed)),
+    return dcc.send_bytes(text_to_mp3_bytes(processed,
+                                            detect_lang(processed)),
                           "speech.mp3")
 
 @app.callback(Output("download-text","data"),
-              State("text-input","value"), State("translate-toggle","value"),
-              Input("download-txt-btn","n_clicks"), prevent_initial_call=True)
+              State("text-input","value"),
+              State("translate-toggle","value"),
+              Input("download-txt-btn","n_clicks"),
+              prevent_initial_call=True)
 def dl_txt(text,toggle,_):
     if not text.strip(): return no_update
     result = smart_translate(text) if "ON" in toggle else text
-    fname="translation_en.txt" if detect_lang(result)=="en" else "traduccion_es.txt"
+    fname = "translation_en.txt" if detect_lang(result)=="en" else "traduccion_es.txt"
     return dict(content=result, filename=fname, type="text/plain")
 
 # ── run -------------------------------------------------------------------
-if __name__=="__main__":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8050)), debug=False)
+
 
 
 
